@@ -1,0 +1,134 @@
+#!/usr/bin/perl -w 
+
+# Author: Yancong Zhang  <zhangyc@mail.bnu.edu.cn>
+# Function: Variants Calling pipeline on CMB cluster
+# Workflow Version 1.0   2013-07-22
+
+=head1 Program Description
+
+Variants calling pipeline on CMB cluster
+
+VarCallpipeline [options] data.conf
+
+    -t,--type   <string>    genome type, [plant, vertebrate, invertebrate or fungi]
+    -q,--queue  <string>    job queue 
+    -h,--help               output help information to screen
+=cut
+
+use strict;
+use Cwd qw( getcwd abs_path );
+use Getopt::Long;
+use Pod::Text;
+use File::Basename;
+use Config::General qw(ParseConfig);
+use Time::HiRes;
+use POSIX qw(strftime);
+use Data::Dumper;
+
+use FindBin qw($Bin);
+use lib "$Bin/lib";
+
+use Job;
+use Shell;
+
+my $MAX_THREADS = 12;			#just for 12 cores nodes in biology queue
+my $CONFIG = "$Bin/conf/var.conf";
+my $QUEUE = "";
+
+my ($HELP, $mode) = ("","");
+my $data_config = $ARGV[$#ARGV];
+GetOptions(
+	"t|type:s"=>\$mode,
+        "q|queue:s"=>\$QUEUE,
+        #"v|verbose!"=>\$VERBOSE,
+        "h|help!"=>\$HELP
+);
+die `pod2text $0` if( !$mode || !$data_config || $HELP);
+
+#########################   INIT AND CHECK THE INPUT   ##############################
+$data_config = abs_path($data_config);
+my %data = ParseConfig($data_config);
+$CONFIG=abs_path($CONFIG);
+my %config = ParseConfig($CONFIG);
+#@@@check input file
+my $outputDir = $data{species};
+my $pair = $data{pair};
+my $map = $data{MAP};
+my $genome = $data{genome};
+my $read1 = $data{read1};
+my $read2 = $data{read2};
+my @files =($genome,$read1);
+if($pair eq "true")
+{
+	push @files,$read2;
+}
+foreach( @files ){
+    die "File $_ is missing!\n" if(!-e $_);
+}
+
+mkdir($outputDir,0775) if(!-e $outputDir);
+$outputDir = abs_path($outputDir);
+############################### START PIPELINE #######################################
+print STDERR "[DAEMON] start workflow at ".strftime("%b %e %H:%M:%S", localtime)."\n";
+
+my $count = 0;
+my @jobArray;
+my %task;
+# "PWD" =>       #working dir
+# "DESC" =>      #task description, will be printed in log
+# "CMD" =>       #task command, must contain input, output and parameters
+# "INPUT" =>     #input file array
+# "OUTPUT" =>    #output file array
+# "TYPE" =>      #job type
+# "POST" =>      #action after submit job
+
+######################   STEP 0 START PREPROCESS DATA   ##############################
+if(!-e "$Bin/bin"){
+    mkdir("$Bin/bin", 0755) or die "Can not make dir $Bin/bin\n";
+}
+foreach my $t(keys %{$config{"0.preprocess"}}){
+    next if($t eq "dir");
+    if(-e $config{"0.preprocess"}{$t}){
+        system("ln -fs ".$config{"0.preprocess"}{$t}."  $Bin/bin/");
+    }else{
+        print STDERR "Can not find command: ".$config{"0.preprocess"}{$t}."\n";
+    }
+}
+system("ln -fs ".$config{"0.preprocess"}{"BWA"}."  $Bin/bin/BWA");
+system("ln -fs ".$config{"0.preprocess"}{"BOWTIE-Build"}."  $Bin/bin/BOWTIE-Build");
+system("ln -fs ".$config{"0.preprocess"}{"BOWTIE"}."  $Bin/bin/BOWTIE");
+$ENV{"VAR_PATH"} = "$Bin/bin";
+
+if(!-e "$outputDir/0.preprocess"){
+    mkdir("$outputDir/0.preprocess", 0755) or die "Can not make dir $outputDir/preprocess\n";
+}
+	system("ln -fs  $genome  $outputDir/0.preprocess/ref.fasta");
+
+######################   STEP 1 START MAPPING  PIPELINE  ##################################
+   if($data{"mapflag"} eq "true")
+   {
+	$task{PWD} = "";
+	$task{DESC} = "Mapping pipeline ";
+	@{$task{"INPUT"}} = ("$outputDir/0.preprocess/ref.fasta");
+	@{$task{"OUTPUT"}} = ("$outputDir/1.mapping/2.dedup/sample.dedup.bam");
+	$task{CMD}  = "$Bin/MappingPipeline -t $mode -G {I1} -p $pair -m $map -o $outputDir/1.mapping  $data_config"; 
+	$task{TYPE} = "SYS";
+	$task{POST} = "WAIT";
+	&taskTrigger($count++, \%task);
+   }
+######################   STEP 2 START Calling PIPELINE   ################################
+   if($data{"varflag"} eq "true")
+   {
+	$task{DESC} = "Calling pipeline ";
+	@{$task{"INPUT"}} = ("$outputDir/0.preprocess/ref.fasta","$outputDir/1.mapping/2.dedup/sample.dedup.bam");
+	@{$task{"OUTPUT"}} = ("$outputDir/2.calling/sample.var.flt.vcf");
+	$task{CMD}  = "$Bin/CallingPipeline -t $mode -G {I1} -I {I2} -o $outputDir/2.calling  $data_config "; 
+	$task{TYPE} = "SYS";
+	$task{POST} = "WAIT";
+	&taskTrigger($count++, \%task);
+   }
+	
+
+print STDERR "[DAEMON] workflow finished at ".strftime("%b %e %H:%M:%S", localtime)."\n";
+
+exit 0;

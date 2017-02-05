@@ -1,0 +1,106 @@
+#!/usr/bin/perl -w 
+
+# Author: Yancong Zhang  <zhangyc@mail.bnu.edu.cn>
+# Function: Variants Calling pipeline on CMB cluster
+# Workflow Version 1.0   2013-07-22
+
+=head1 Program Description
+
+Calling pipeline on CMB cluster
+
+CallingPipeline [options] data.conf
+
+    -t,--type   <string>    genome type, [plant, vertebrate, invertebrate or fungi]
+    -G,--genome	<string>	genome
+	-I,--input  <string>    mapping results ,[sample.dedup.bam]
+    -o,--output <string>    outputdir, [2.realignment]  
+    -h,--help               output help information to screen
+=cut
+
+
+use strict;
+use Getopt::Long;
+use Pod::Text;
+use File::Basename;
+use Config::General qw(ParseConfig);
+use Time::HiRes;
+use POSIX qw(strftime);
+use Data::Dumper;
+
+use FindBin qw($Bin);
+use lib "$Bin/lib";
+
+use Job;
+
+my $MAX_THREADS = 12;			#just for 12 cores nodes in biology queue
+my $CONFIG = "$Bin/conf/var.conf";
+my $SCRIPT = "$Bin/script";
+my $Tool_PATH= "$Bin/bin";
+
+my ($HELP, $mode) = ("","");
+my $genome = "";
+my $dedup = "";
+my $outputDir = "";
+GetOptions(
+	"t|type:s"=>\$mode,
+	"G|genome:s"=>\$genome,
+	"I|input:s"=>\$dedup,
+	"o|outdir:s"=>\$outputDir,
+        #"v|verbose!"=>\$VERBOSE,
+        "h|help!"=>\$HELP
+);
+my $data_config = $ARGV[$#ARGV];
+die `pod2text $0` if( !$mode || !$genome || !$dedup || !$outputDir || !$data_config || $HELP);
+
+#########################   INIT AND CHECK THE INPUT   ##############################
+my %data = ParseConfig($data_config);
+
+#check input file
+my @files=($genome,$dedup);
+foreach( @files ){
+	die "File $_ is missing!\n" if(!-e $_);
+}
+
+############################### INIT PIPELINE #######################################
+$ENV{"VAR_PATH"} = "$SCRIPT:$Tool_PATH";
+
+############################### START PIPELINE #######################################
+print STDERR "[DAEMON] start workflow at ".strftime("%b %e %H:%M:%S", localtime)."\n";
+
+my $count = 1;
+my @jobArray;
+my %task;
+# "PWD" =>       #working dir
+# "DESC" =>      #task description, will be printed in log
+# "CMD" =>       #task command, must contain input, output and parameters
+# "INPUT" =>     #input file array
+# "OUTPUT" =>    #output file array
+# "TYPE" =>      #job type
+# "POST" =>      #action after submit job
+
+
+######################   step  SAMtools calling ###################################
+  	$task{PWD} = "$outputDir";
+	@{$task{"INPUT"}} = ($genome,$dedup);
+	@{$task{"OUTPUT"}} = ("sample.var.raw.bcf");
+	$task{DESC} = "Running SAMTools variants calling";
+	$task{CMD}  = "$Tool_PATH/samtools mpileup -DSugf {I1} {I2} >sample.var.raw.bcf";
+	$task{TYPE} = "JMS:1:10";
+	$task{POST} = "WAIT";
+	&taskTrigger($count++, \%task);
+	
+	@{$task{"INPUT"}} = ("sample.var.raw.bcf");
+	@{$task{"OUTPUT"}} = ("sample.var.flt.vcf");
+	$task{DESC} = "Running SAMTools filter";
+	$task{CMD}  = "$Tool_PATH/bcftools view -Ncvg {I1} >sample.var.raw.vcf; ";
+	$task{CMD} .= "perl $Tool_PATH/vcfutils.pl varFilter -D 100 -d 10  sample.var.raw.vcf > sample.var.flt.vcf";
+  	$task{TYPE} = "JMS:1:4";
+	$task{POST} = "WAIT";
+	&taskTrigger($count++, \%task);
+	#&taskWaiter(\@jobArray);
+
+#print STDERR "[DAEMON] start clean tmpfiles at ".strftime("%b %e %H:%M:%S", localtime)."\n";
+
+print "[DAEMON] workflow finished at ".strftime("%b %e %H:%M:%S", localtime)."\n";
+
+exit 0;

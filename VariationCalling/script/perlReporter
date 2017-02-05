@@ -1,0 +1,53 @@
+#!/usr/bin/perl -w 
+
+# Author: Yancong Zhang  <zhangyc@mail.bnu.edu.cn>
+# Genome Annotation pipeline on CMB cluster
+# Program Version 1.0    2013-01-02
+# Workflow Version 2.0   2013-01-02
+
+=head1 Program Description
+
+Genome Annotation pipeline on CMB cluster
+
+perlReporter [options] cmd
+
+	-n,--nodelist	<string>	node list
+	-p,--ppn	<int>		process number
+	-h,--help               output help information to screen
+=cut
+
+use strict;
+use Carp;
+use Getopt::Long;
+use Pod::Text;
+use Time::HiRes;
+use POSIX qw(strftime);
+use Data::Dumper;
+
+my ($HELP, $nodeList, $ppn) = ("","",1);
+my $cmd = $ARGV[$#ARGV];
+GetOptions(
+	"n|node:s"=>\$nodeList,
+        "p|ppn:i"=>\$ppn,
+        #"v|verbose!"=>\$VERBOSE,
+        "h|help!"=>\$HELP
+);
+die `pod2text $0` if( !$nodeList || !$ppn || $HELP);
+
+print "start ".strftime("%b %e %H:%M:%S", localtime)."\n";
+
+	#filter cmd line here";
+	$cmd =~ s/%PBS_NODEFILE%/$nodeList/g;
+	$cmd =~ s/%NPROCS%/$ppn/g;
+
+my $status = system("$cmd");
+if(($status >>=8) != 0){
+	#croak "Couldn't run qsub to submit job ($@)";
+	die "Couldn't run :$cmd, please check it manually\n";
+}else{
+
+	print "start ".strftime("%b %e %H:%M:%S", localtime)."\n";
+	print "Done\n";
+	exit 0;
+
+}

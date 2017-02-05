@@ -1,0 +1,233 @@
+#!/usr/bin/perl -w 
+
+# Author: Yancong Zhang  <zhangyc@mail.bnu.edu.cn>
+# Function: Variants Calling pipeline on CMB cluster
+# Workflow Version 1.0   2013-07-22
+
+=head1 Program Description
+
+Mapping pipeline on CMB cluster
+
+MappingPipeline [options] data.conf
+
+    -t,--type   <string>    genome type, [plant, vertebrate, invertebrate or fungi]
+    -G,--genome <string>    genome file
+	-p,--pair   <string>    paired-end || single-end ,[true, false]
+    -m,--map    <string>    mapping tools
+	-o,--output <string>    outputdir , [mapping]
+    -h,--help               output help information to screen
+=cut
+
+
+use strict;
+use Getopt::Long;
+use Pod::Text;
+use File::Basename;
+use Config::General qw(ParseConfig);
+use Time::HiRes;
+use POSIX qw(strftime);
+use Data::Dumper;
+use feature qw{ switch };    # Given/when instead of switch
+
+use FindBin qw($Bin);
+use lib "$Bin/lib";
+
+use Job;
+use Shell;
+
+my $MAX_THREADS = 12;			#just for 12 cores nodes in biology queue
+my $CONFIG = "$Bin/conf/var.conf";
+my $SCRIPT = "$Bin/script";
+my $Tool_PATH= "$Bin/bin";
+
+my ($HELP, $mode) = ("","");
+my $genome = "";
+my $pair = "";
+my $MAP="";
+my $outputDir = "";
+GetOptions(
+	"t|type:s"=>\$mode,
+        "G|genome:s"=>\$genome,
+		"m|map:s"=>\$MAP,
+        "p|pair:s"=>\$pair,
+	"o|outdir:s"=>\$outputDir,
+        #"v|verbose!"=>\$VERBOSE,
+        "h|help!"=>\$HELP
+);
+my $data_config = $ARGV[$#ARGV];
+die `pod2text $0` if( !$mode || !$genome || !$MAP || !$pair || !$outputDir || !$data_config || $HELP);
+
+#########################   INIT AND CHECK THE INPUT   ##############################
+my %data = ParseConfig($data_config);
+
+my $read1=$data{"read1"};
+my $read2=$data{"read2"};
+
+#check input file
+my @files=($genome,$read1);
+if($pair eq "true")
+{
+	push @files,$read2;
+}
+foreach( @files ){
+	die "File $_ is missing!\n" if(!-e $_);
+}
+
+############################### INIT PIPELINE #######################################
+$ENV{"VAR_PATH"} = "$SCRIPT:$Tool_PATH";
+
+############################### START PIPELINE #######################################
+print STDERR "[DAEMON] start workflow at ".strftime("%b %e %H:%M:%S", localtime)."\n";
+
+my $count = 1;
+my @jobArray;
+my %task;
+# "PWD" =>       #working dir
+# "DESC" =>      #task description, will be printed in log
+# "CMD" =>       #task command, must contain input, output and parameters
+# "INPUT" =>     #input file array
+# "OUTPUT" =>    #output file array
+# "TYPE" =>      #job type
+# "POST" =>      #action after submit job
+
+#####################   STEP 1 RUN B mapping   ###############################
+	given ($MAP) {
+		when (/bwa/i) {
+		if($pair eq "true")
+		{
+			$task{PWD} = "$outputDir/1.map/";
+			@{$task{"INPUT"}} = ($genome);
+			@{$task{"OUTPUT"}} = ("ref.fasta.bwt");
+			$task{DESC} = "Running bwa index for paired-end reads";
+			$task{CMD}	= "ln -fs $genome $task{PWD}/; ";
+			$task{CMD} .= "$Tool_PATH/BWA index -a is ref.fasta";
+			$task{TYPE} = "JMS:1:2";
+			$task{POST} = "WAIT";
+			&taskTrigger($count++, \%task);
+			
+			@{$task{"INPUT"}} = ("ref.fasta",$read1,$read2);
+			@{$task{"OUTPUT"}} = ("sample01.sam");
+			 $task{DESC} = "Running bwa aln &sampe for paired-end reads";
+			$task{CMD}  = "$Tool_PATH/BWA aln -t 8  {I1} {I2} >sample01_1.sai; ";
+			$task{CMD} .= "$Tool_PATH/BWA aln -t 8  {I1} {I3} >sample01_2.sai; ";
+			$task{CMD} .= "$Tool_PATH/BWA sampe -r \"\@RG\tID:sample01\tLB:sample01\tPL:ILLUMINA\tSM:sample01\" {I1} sample01_1.sai sample01_2.sai {I2} {I3} >sample01.sam ";
+			$task{TYPE} = "JMS:1:8";
+			$task{POST} = "WAIT";
+			&taskTrigger($count++, \%task);
+
+			@{$task{"INPUT"}} = ("sample01.sam");
+			@{$task{"OUTPUT"}} = ("sample.sort.bam");
+			$task{DESC} = "Running Picard SortSam for paired-end reads";
+			$task{CMD}  = "$Tool_PATH/samtools view -bS {I1} -o sample01.bam; ";
+			$task{CMD} .= "java -Xmx10g -jar $Tool_PATH/SortSam.jar  INPUT=sample01.bam OUTPUT=sample.sort.bam SORT_ORDER=coordinate  VALIDATION_STRINGENCY=LENIENT";
+			$task{TYPE} = "JMS:1:2";
+			$task{POST} = "WAIT";
+			&taskTrigger($count++, \%task);
+		}
+		if($pair eq "false")
+		{
+			$task{PWD} = "$outputDir/1.map";
+			@{$task{"INPUT"}} = ($genome);
+			@{$task{"OUTPUT"}} = ("ref.fasta.bwt");
+			$task{DESC} = "Running bwa index for single-end reads";
+			$task{CMD}  = "ln -fs $genome $task{PWD}/; ";
+			$task{CMD} .= "$Tool_PATH/BWA index -a is ref.fasta";
+			$task{TYPE} = "JMS:1:2";
+			$task{POST} = "WAIT";
+			&taskTrigger($count++, \%task);
+
+			@{$task{"INPUT"}} = ("ref.fasta",$read1);
+			@{$task{"OUTPUT"}} = ("sample01.sam");
+			$task{DESC} = "Running bwa aln & samse for single-end reads";
+			$task{CMD}  = "$Tool_PATH/BWA aln -t 8 {I1} {I2}> sample01.sai; ";
+			$task{CMD} .= "$Tool_PATH/BWA samse -r \"\@RG\tID:sample01\tLB:sample01\tPL:ILLUMINA\tSM:sample01\" {I1} sample01.sai  {I2} >sample01.sam";
+			$task{TYPE} = "JMS:1:8";
+			$task{POST} = "WAIT";
+			&taskTrigger($count++, \%task);
+
+			@{$task{"INPUT"}} = ("sample01.sam");
+			@{$task{"OUTPUT"}} = ("sample.sort.bam");
+			$task{DESC} = "Running Picard SortSam for single-end reads";
+			$task{CMD}  = "$Tool_PATH/samtools view -bS {I1} -o sample01.bam; ";
+			$task{CMD} .= "java -Xmx10g -jar  $Tool_PATH/SortSam.jar  INPUT=sample01.bam OUTPUT=sample.sort.bam SORT_ORDER=coordinate VALIDATION_STRINGENCY=LENIENT";
+			$task{TYPE} = "JMS:1:2";
+			$task{POST} = "WAIT";
+			&taskTrigger($count++, \%task);
+		}
+	  }# when bwa
+	  when (/bowtie/i) {
+	  	if($pair eq "true")
+		{
+			$task{PWD} = "$outputDir/1.map";
+	  	    @{$task{"INPUT"}} = ($genome,$read1,$read2);
+			@{$task{"OUTPUT"}} = ("sample01.sam");
+			$task{DESC} = "Running bowtie for paired-end reads";
+			$task{CMD}  = "$Tool_PATH/BOWTIE-Build {I1} ref; ";
+			$task{CMD} .= "$Tool_PATH/BOWTIE -x ref -1 {I2} -2 {I3} -S sample01.sam";
+	  		$task{TYPE} = "JMS:1:8";
+			$task{POST} = "WAIT";
+			&taskTrigger($count++, \%task);
+			
+			@{$task{"INPUT"}} = ("sample01.sam");
+			@{$task{"OUTPUT"}} = ("sample.sort.bam");
+			 $task{DESC} = "Running Picard SortSam for paired-end reads";
+			$task{CMD}  = "$Tool_PATH/samtools view -bS {I1} -o sample01.bam; ";
+			$task{CMD} .= "java -Xmx10g -jar  $Tool_PATH/SortSam.jar  INPUT=sample01.bam OUTPUT=sample.sort.bam SORT_ORDER=coordinate";
+			$task{TYPE} = "JMS:1:6";
+			$task{POST} = "WAIT";
+			&taskTrigger($count++, \%task);
+		 }
+		if($pair eq "false")
+        {   
+            $task{PWD} = "$outputDir/1.map";
+			@{$task{"INPUT"}} = ($genome,$read1);
+            @{$task{"OUTPUT"}} = ("sample01.sam");
+            $task{DESC} = "Running bowtie for single-end reads";
+            $task{CMD}  = "$Tool_PATH/BOWTIE-Build {I1} ref; ";
+            $task{CMD} .= "$Tool_PATH/BOWTIE -x ref  {I2} -S sample01.sam";
+			$task{TYPE} = "JMS:1:8";
+			$task{POST} = "WAIT";
+			&taskTrigger($count++, \%task);
+
+			@{$task{"INPUT"}} = ("sample01.sam");
+			@{$task{"OUTPUT"}} = ("sample.sort.bam");
+			 $task{DESC} = "Running Picard SortSam for single-end reads";
+            $task{CMD}  = "$Tool_PATH/samtools view -bS {I1} -o sample01.bam; ";
+            $task{CMD} .= "java -Xmx10g -jar  $Tool_PATH/SortSam.jar  INPUT=sample01.bam OUTPUT=sample.sort.bam SORT_ORDER=coordinate";        
+			$task{TYPE} = "JMS:1:6";
+			$task{POST} = "WAIT";
+			&taskTrigger($count++, \%task);
+		}
+	  }#when bowtie
+    }# given
+	
+    #&taskWaiter(\@jobArray);
+
+######################   STEP 2 RUN DeDuplication   ################################
+	my $DUP_FILE=$outputDir."/1.map/sample.sort.bam";
+	if($data{"dedup"} eq "true")
+	{
+		$task{PWD} = "$outputDir/2.dedup/";
+		@{$task{"INPUT"}} = ($DUP_FILE);
+		@{$task{"OUTPUT"}} = ("sample.dedup.bam");
+		#$task{DESC} = "Running GATK MarkDuplication for sample.dedup.bam";
+		#$task{CMD}  = "java -Xmx10g -jar  $Tool_PATH/MarkDuplicates.jar  INPUT= {I1} OUTPUT= sample.dedup.bam  METRICS_FILE= sample.dedup.metrics"; 
+		$task{DESC} = "Running Samtools rmdup for sample.dedup.bam";
+		$task{CMD}  = "$Tool_PATH/samtools rmdup -S {I1} sample.dedup.bam";
+		$task{TYPE} = "JMS:1:8";
+		$task{POST} = "WAIT";
+		&taskTrigger($count++, \%task);
+		#&taskWaiter(\@jobArray);
+	}
+	if ($data{"dedup"} eq "false")
+	{
+		system("mkdir $outputDir/2.dedup/");
+		system("ln -fs $DUP_FILE  $outputDir/2.dedup/sample.dedup.bam");
+	}
+
+
+#print STDERR "[DAEMON] start clean tmpfiles at ".strftime("%b %e %H:%M:%S", localtime)."\n";
+
+print "[DAEMON] workflow finished at ".strftime("%b %e %H:%M:%S", localtime)."\n";
+
+exit 0;
